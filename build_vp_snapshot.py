@@ -21,30 +21,51 @@ TRACKED_TICKERS = [
     "ORCL", "CRM", "AVGO", "NFLX", "PLTR", "UBER", "SNOW", "NET", "DDOG",
     "SHOP", "NOW", "ADBE", "INTC", "QCOM", "MU", "ARM", "AMAT", "LRCX",
     "PANW", "CRWD", "ZS", "OKTA", "HUBS", "TWLO", "GTLB",
-    # Financials
+    # Financials large
     "JPM", "BAC", "GS", "WFC", "BLK", "V", "MA", "AXP", "MS", "C",
     "SCHW", "COF", "USB", "PNC", "TFC", "SPGI", "MCO", "ICE", "CME",
-    # Healthcare / Biotech
+    # Financials mid (high insider activity)
+    "ALLY", "SFI", "NBBK", "FFIN", "CVBF", "WSFS", "GBCI", "STBA",
+    "TOWN", "FULT", "BOKF", "SNV", "SFNC", "IBCP", "HTLF", "BANR",
+    "HOPE", "HAFC", "CASH", "AMAL", "CHCO", "ESSA", "FWBI", "UVSP",
+    # Healthcare / Biotech large
     "LLY", "PFE", "JNJ", "MRK", "UNH", "ABBV", "VRTX", "ISRG", "BMY",
     "AMGN", "GILD", "REGN", "BIIB", "MRNA", "ILMN", "DXCM", "IDXX",
     "CVS", "HUM", "CI", "ELV", "MOH",
-    # Energy
+    # Biotech mid (insiders buy dips aggressively)
+    "INSM", "PRTA", "KPTI", "UTHR", "RARE", "ACAD", "FOLD", "PTGX",
+    "AGEN", "LQDA", "IMVT", "RCUS", "TGTX", "ACLS", "MGNX", "PRAX",
+    "ARWR", "EDIT", "BEAM", "NTLA", "CRSP", "IONS", "SRPT", "BHVN",
+    # Energy large
     "XOM", "CVX", "COP", "OXY", "SLB", "HAL", "MPC", "PSX", "VLO",
-    "EOG", "PXD", "DVN",
-    # Industrials / Defense
+    "EOG", "DVN",
+    # Energy mid
+    "CTRA", "MTDR", "SM", "CHRD", "MGY", "PR", "NOG", "PDCE",
+    "RRC", "AR", "EQT", "CNX", "SWN", "GPOR",
+    # Industrials / Defense large
     "CAT", "RTX", "GE", "BA", "LMT", "NOC", "GD", "HII", "LHX",
-    "HON", "MMM", "UPS", "FDX", "DE", "EMR",
-    # Consumer
+    "HON", "MMM", "UPS", "FDX", "EMR",
+    # Industrials mid (seen in EFTS today)
+    "GXO", "XYL", "WAB", "CVLG", "SNCY", "RLI", "HWKN", "MTRN",
+    "WNC", "WAIR", "HAYN", "DRD", "KALU", "GFF", "IIIN", "MLI",
+    "MATX", "ARCB", "LSTR", "SAIA", "ODFL", "KNX", "JBHT",
+    # Consumer large
     "WMT", "HD", "COST", "KO", "DIS", "MCD", "SBUX", "NKE", "TGT",
     "LOW", "TJX", "BKNG", "MAR", "HLT", "YUM", "CMG",
+    # Consumer mid
+    "TXRH", "DENN", "JACK", "EAT", "DRI", "BJRI", "CAKE", "RRGB",
+    "PLAY", "PLBY", "DKNG", "PENN", "RRR", "BYD", "GDEN",
     # Real Estate / Utilities
     "AMT", "PLD", "EQIX", "CCI", "SPG", "NEE", "DUK", "SO",
+    "NNN", "O", "STOR", "EPRT", "ADC", "NTST", "GTY",
     # EU / International
-    "ASML", "SAP", "AZN", "SHEL", "SPOT", "NVO", "NOVO-B.CO",
-    "TSM", "BABA", "TCEHY",
-    # Small/Mid high-signal
+    "ASML", "SAP", "AZN", "SHEL", "SPOT", "NVO", "TSM",
+    # Small/Mid high-signal tech
     "SMCI", "SOUN", "IONQ", "RKLB", "LUNR", "ASTS", "ACHR",
     "APP", "HOOD", "SOFI", "AFRM", "UPST",
+    # Additional high-insider-activity mid-caps (seen active in EFTS)
+    "DOCN", "GXO", "ELV", "TRGP", "ENVA", "AMR", "DFIN", "SNEX",
+    "CRH", "DVN", "PRGO", "SWKS", "RLI", "MTRN", "INSM",
 ]
 
 SECTOR_ETFS = {
