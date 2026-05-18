@@ -386,96 +386,146 @@ def company_loader(ticker):
 
 def fetch_sec_edgar_form4(tracked_tickers, min_value=50000, days_back=730):
     """
-    Fetch recent Form 4 filings directly from SEC EDGAR.
-    Strategy:
-      1. Look up CIK for each ticker via EDGAR company search
-      2. Fetch submissions JSON to get recent Form 4 accession numbers
-      3. Fetch & parse each Form 4 XML to extract transaction details
-    Free, no auth required. User-Agent required.
-    Rate limit: 10 req/sec — we sleep 0.12s between calls.
+    Fetch recent Form 4 filings via two complementary approaches:
+      1. EFTS full-text search API (efts.sec.gov) — fast bulk search, returns
+         all Form 4s filed in a date range across all tickers in one query.
+         This is the modern EDGAR search API, same one powering efts.sec.gov/LATEST.
+      2. Per-company submissions fallback for any tickers EFTS missed.
+
+    Free, no auth required. User-Agent header required by SEC policy.
+    Rate limit: 10 req/sec — sleep 0.12s between XML fetches.
     """
     import time
     import xml.etree.ElementTree as ET
 
-    print("  [SEC EDGAR] Fetching Form 4 filings via EDGAR submissions API...")
-    HEADERS = {"User-Agent": "VantagePoint Research research@vantagepoint.app"}
+    HEADERS = {"User-Agent": "VantagePoint Research fedde.vreeken@gmail.com"}
     date_cutoff = (datetime.now().date() - pd.Timedelta(days=days_back)).isoformat()
+    date_from = (datetime.now().date() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d")
     tracked_set = set(t.upper() for t in tracked_tickers)
     results = []
+    seen_accessions = set()
 
-    # Step 1: ticker → CIK mapping via EDGAR company search tickers.json
+    # ── Step 1: EFTS bulk search — get ALL Form 4 filings in date range ──────
+    # One API call returns up to 10,000 hits sorted by date desc.
+    # We paginate in chunks of 100 until we have everything.
+    print("  [SEC EDGAR] Phase 1: EFTS bulk Form 4 search...")
+    efts_hits = []
+    try:
+        page = 0
+        page_size = 100
+        while True:
+            efts_url = (
+                f"https://efts.sec.gov/LATEST/search-index?q=%22form+4%22"
+                f"&dateRange=custom&startdt={date_from}"
+                f"&forms=4&hits.hits._source=period_of_report,file_date,entity_name,file_num"
+                f"&hits.hits.total.value=true"
+                f"&hits.hits.highlight=false"
+                f"&hits.hits._source.includes=period_of_report,file_date,entity_name"
+                f"&from={page * page_size}&size={page_size}"
+            )
+            # Use the simpler EFTS search endpoint
+            efts_url2 = (
+                f"https://efts.sec.gov/LATEST/search-index?forms=4"
+                f"&dateRange=custom&startdt={date_from}"
+                f"&hits.hits.total.value=true&from={page * page_size}&size={page_size}"
+            )
+            resp = requests.get(
+                "https://efts.sec.gov/LATEST/search-index",
+                params={
+                    "forms": "4",
+                    "dateRange": "custom",
+                    "startdt": date_from,
+                    "hits.hits.total.value": "true",
+                    "from": page * page_size,
+                    "size": page_size,
+                },
+                headers=HEADERS,
+                timeout=20,
+            )
+            time.sleep(0.15)
+            if not resp.ok:
+                print(f"  [SEC EDGAR] EFTS returned {resp.status_code}, falling back")
+                break
+            data = resp.json()
+            hits = data.get("hits", {}).get("hits", [])
+            if not hits:
+                break
+            efts_hits.extend(hits)
+            total = data.get("hits", {}).get("total", {}).get("value", 0)
+            print(f"  [SEC EDGAR] EFTS page {page+1}: {len(efts_hits)}/{total} filings fetched")
+            if len(efts_hits) >= total or len(efts_hits) >= 2000:
+                break
+            page += 1
+            if page > 20:  # safety cap
+                break
+        print(f"  [SEC EDGAR] EFTS returned {len(efts_hits)} Form 4 filing metadata entries")
+    except Exception as exc:
+        print(f"  [SEC EDGAR] EFTS search failed: {exc}")
+
+    # ── Step 2: Ticker→CIK map (needed for both paths) ───────────────────────
     ticker_cik = {}
     try:
         resp = requests.get(
             "https://www.sec.gov/files/company_tickers.json",
             headers=HEADERS, timeout=20
         )
+        time.sleep(0.15)
         if resp.ok:
-            data = resp.json()
-            for entry in data.values():
+            for entry in resp.json().values():
                 sym = (entry.get("ticker") or "").upper()
                 cik = str(entry.get("cik_str") or "").zfill(10)
                 if sym and cik and sym in tracked_set:
                     ticker_cik[sym] = cik
             print(f"  [SEC EDGAR] Mapped {len(ticker_cik)} tickers to CIKs")
-        time.sleep(0.15)
     except Exception as exc:
         print(f"  [SEC EDGAR] CIK lookup failed: {exc}")
-        return results
 
-    def parse_form4_xml(xml_text, ticker, cik):
-        """Parse a Form 4 XML and return list of transaction dicts."""
+    # Reverse map: CIK → ticker
+    cik_ticker = {v: k for k, v in ticker_cik.items()}
+
+    def parse_form4_xml(xml_text, ticker):
+        """Parse Form 4 XML → list of transaction dicts."""
         txns = []
         try:
             root = ET.fromstring(xml_text)
-            ns = ""
-            # Get reporter name
+            # Reporter info
+            insider_name, title = "", "Insider"
             rpt = root.find(".//reportingOwner")
-            insider_name = ""
-            title = "Insider"
             if rpt is not None:
                 n = rpt.find(".//rptOwnerName")
                 if n is not None and n.text:
                     insider_name = normalize_name(n.text.strip())
                 rel = rpt.find(".//reportingOwnerRelationship")
                 if rel is not None:
-                    titles = []
-                    if rel.findtext("isDirector") == "1": titles.append("Director")
+                    parts = []
+                    if rel.findtext("isDirector") == "1": parts.append("Director")
                     if rel.findtext("isOfficer") == "1":
-                        ot = rel.findtext("officerTitle") or "Officer"
-                        titles.append(ot.strip())
-                    if rel.findtext("isTenPercentOwner") == "1": titles.append("10% Owner")
-                    title = " / ".join(titles) or "Insider"
-
-            # Period of report
+                        ot = (rel.findtext("officerTitle") or "Officer").strip()
+                        parts.append(ot)
+                    if rel.findtext("isTenPercentOwner") == "1": parts.append("10% Owner")
+                    title = " / ".join(parts) or "Insider"
+            # Trade date
             period = root.findtext(".//periodOfReport") or ""
             try:
                 trade_date = pd.to_datetime(period).date().isoformat()
             except Exception:
                 trade_date = datetime.now().date().isoformat()
-
             if trade_date < date_cutoff:
                 return txns
-
-            # Non-derivative transactions
-            for txn in root.findall(".//nonDerivativeTransaction"):
-                code_el = txn.find(".//transactionCode")
+            # Transactions
+            for txn_el in root.findall(".//nonDerivativeTransaction"):
+                code_el = txn_el.find(".//transactionCode")
                 code = (code_el.text or "").strip() if code_el is not None else ""
-                # P = purchase, S = sale
                 if code not in ("P", "S"):
                     continue
-                shares_el = txn.find(".//transactionShares/value")
-                price_el = txn.find(".//transactionPricePerShare/value")
-                try:
-                    shares = abs(int(float(shares_el.text))) if shares_el is not None and shares_el.text else 0
-                except Exception:
-                    shares = 0
-                try:
-                    price = float(price_el.text) if price_el is not None and price_el.text else 0.0
-                except Exception:
-                    price = 0.0
+                shares_el = txn_el.find(".//transactionShares/value")
+                price_el  = txn_el.find(".//transactionPricePerShare/value")
+                try: shares = abs(int(float(shares_el.text))) if shares_el is not None and shares_el.text else 0
+                except: shares = 0
+                try: price = float(price_el.text) if price_el is not None and price_el.text else 0.0
+                except: price = 0.0
                 value = int(shares * price)
-                if value < min_value:
+                if value < min_value or not insider_name:
                     continue
                 txns.append({
                     "ticker": ticker,
@@ -493,68 +543,95 @@ def fetch_sec_edgar_form4(tracked_tickers, min_value=50000, days_back=730):
             pass
         return txns
 
-    # Step 2: for each ticker, get recent Form 4 filings from submissions API
+    def fetch_and_parse_accession(acc, cik, ticker):
+        """Fetch the Form 4 XML for a given accession number and parse it."""
+        if acc in seen_accessions:
+            return []
+        seen_accessions.add(acc)
+        acc_clean = acc.replace("-", "")
+        cik_int = int(cik)
+        # Try direct XML filename pattern first (faster than fetching index)
+        xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{acc}.xml"
+        try:
+            r = requests.get(xml_url, headers=HEADERS, timeout=10)
+            time.sleep(0.12)
+            if r.ok and "<ownershipDocument" in r.text:
+                return parse_form4_xml(r.text, ticker)
+        except Exception:
+            pass
+        # Fallback: fetch index to find XML filename
+        try:
+            idx_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{acc}-index.json"
+            r2 = requests.get(idx_url, headers=HEADERS, timeout=10)
+            time.sleep(0.12)
+            if not r2.ok:
+                return []
+            for item in r2.json().get("directory", {}).get("item", []):
+                name = item.get("name", "")
+                if name.endswith(".xml") and "index" not in name.lower():
+                    xml_r = requests.get(
+                        f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{name}",
+                        headers=HEADERS, timeout=10
+                    )
+                    time.sleep(0.12)
+                    if xml_r.ok:
+                        return parse_form4_xml(xml_r.text, ticker)
+        except Exception:
+            pass
+        return []
+
+    # ── Step 3: For each EFTS hit, find the ticker and parse XML ─────────────
+    efts_found = 0
+    for hit in efts_hits:
+        src = hit.get("_source", {})
+        entity_id = hit.get("_id", "")  # format: accession-number
+        # Extract accession from _id (e.g. "0001234567-24-000001")
+        acc = entity_id if entity_id.count("-") >= 2 else ""
+        if not acc:
+            continue
+        # Try to identify ticker from entity name or CIK in the hit
+        # EFTS hits include 'entity_id' which maps to CIK
+        hit_cik = str(src.get("entity_id") or hit.get("_routing") or "").zfill(10)
+        ticker = cik_ticker.get(hit_cik, "")
+        if not ticker:
+            continue  # not one of our tracked tickers
+        txns = fetch_and_parse_accession(acc, hit_cik, ticker)
+        results.extend(txns)
+        if txns:
+            efts_found += 1
+    print(f"  [SEC EDGAR] EFTS path: parsed {efts_found} filings with transactions")
+
+    # ── Step 4: Per-company fallback via submissions API (catches any misses) ──
+    print(f"  [SEC EDGAR] Phase 2: per-company submissions sweep for {len(ticker_cik)} tickers...")
     processed = 0
     for ticker, cik in list(ticker_cik.items()):
         try:
-            sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-            resp = requests.get(sub_url, headers=HEADERS, timeout=15)
+            sub = requests.get(
+                f"https://data.sec.gov/submissions/CIK{cik}.json",
+                headers=HEADERS, timeout=15
+            )
             time.sleep(0.12)
-            if not resp.ok:
+            if not sub.ok:
                 continue
-            sub = resp.json()
-
-            # Get recent filings
-            recent = sub.get("filings", {}).get("recent", {})
-            forms = recent.get("form", [])
-            accessions = recent.get("accessionNumber", [])
+            recent = sub.json().get("filings", {}).get("recent", {})
+            forms        = recent.get("form", [])
+            accessions   = recent.get("accessionNumber", [])
             filing_dates = recent.get("filingDate", [])
-
-            # Find Form 4 filings within date window
-            form4_filings = [
-                (acc, fdate)
-                for form, acc, fdate in zip(forms, accessions, filing_dates)
-                if form == "4" and fdate >= date_cutoff
+            form4s = [
+                (acc, fd) for form, acc, fd in zip(forms, accessions, filing_dates)
+                if form == "4" and fd >= date_cutoff and acc not in seen_accessions
             ]
-
-            # Process up to 30 most recent Form 4 filings per company
-            for acc, fdate in form4_filings[:30]:
-                acc_clean = acc.replace("-", "")
-                # Fetch the filing index to find the XML file
-                idx_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{acc}-index.json"
-                try:
-                    idx_resp = requests.get(idx_url, headers=HEADERS, timeout=10)
-                    time.sleep(0.12)
-                    if not idx_resp.ok:
-                        continue
-                    idx_data = idx_resp.json()
-                    # Find the .xml form 4 file
-                    xml_file = None
-                    for item in idx_data.get("directory", {}).get("item", []):
-                        name = item.get("name", "")
-                        if name.endswith(".xml") and not name.endswith("-index.xml"):
-                            xml_file = name
-                            break
-                    if not xml_file:
-                        continue
-                    xml_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{xml_file}"
-                    xml_resp = requests.get(xml_url, headers=HEADERS, timeout=10)
-                    time.sleep(0.12)
-                    if not xml_resp.ok:
-                        continue
-                    txns = parse_form4_xml(xml_resp.text, ticker, cik)
-                    results.extend(txns)
-                except Exception:
-                    continue
-
+            for acc, _ in form4s[:20]:
+                txns = fetch_and_parse_accession(acc, cik, ticker)
+                results.extend(txns)
             processed += 1
             if processed % 10 == 0:
-                print(f"  [SEC EDGAR] Processed {processed}/{len(ticker_cik)} tickers, {len(results)} transactions so far...")
-        except Exception as exc:
+                print(f"  [SEC EDGAR] Submissions sweep: {processed}/{len(ticker_cik)} tickers, {len(results)} txns total")
+        except Exception:
             continue
 
     results = [r for r in results if r.get("insider") and r.get("value", 0) >= min_value]
-    print(f"  [SEC EDGAR] Total: {len(results)} Form 4 transactions from {processed} companies")
+    print(f"  [SEC EDGAR] Total: {len(results)} Form 4 transactions")
     return results
 
 
