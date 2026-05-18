@@ -545,57 +545,62 @@ def fetch_sec_edgar_form4(tracked_tickers, min_value=50000, days_back=730):
 
     def fetch_and_parse_accession(acc, cik, ticker):
         """Fetch the Form 4 XML for a given accession number and parse it."""
-        if acc in seen_accessions:
+        acc_dashed = acc if "-" in acc else f"{acc[:10]}-{acc[10:12]}-{acc[12:]}"
+        acc_clean = acc_dashed.replace("-", "")
+        if acc_dashed in seen_accessions:
             return []
-        seen_accessions.add(acc)
-        acc_clean = acc.replace("-", "")
+        seen_accessions.add(acc_dashed)
         cik_int = int(cik)
-        # Try direct XML filename pattern first (faster than fetching index)
-        xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{acc}.xml"
+        # Always use the index JSON to find the real XML filename
+        # (the filename is never simply acc.xml — it varies per filing agent)
         try:
-            r = requests.get(xml_url, headers=HEADERS, timeout=10)
+            idx_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{acc_dashed}-index.json"
+            r = requests.get(idx_url, headers=HEADERS, timeout=10)
             time.sleep(0.12)
-            if r.ok and "<ownershipDocument" in r.text:
-                return parse_form4_xml(r.text, ticker)
-        except Exception:
-            pass
-        # Fallback: fetch index to find XML filename
-        try:
-            idx_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{acc}-index.json"
-            r2 = requests.get(idx_url, headers=HEADERS, timeout=10)
-            time.sleep(0.12)
-            if not r2.ok:
+            if not r.ok:
                 return []
-            for item in r2.json().get("directory", {}).get("item", []):
+            items = r.json().get("directory", {}).get("item", [])
+            # Find the primary Form 4 XML (not the index XML, not the htm)
+            xml_name = None
+            for item in items:
                 name = item.get("name", "")
-                if name.endswith(".xml") and "index" not in name.lower():
-                    xml_r = requests.get(
-                        f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{name}",
-                        headers=HEADERS, timeout=10
-                    )
-                    time.sleep(0.12)
-                    if xml_r.ok:
-                        return parse_form4_xml(xml_r.text, ticker)
+                if name.endswith(".xml") and "-index" not in name and "xsl" not in name.lower():
+                    xml_name = name
+                    break
+            if not xml_name:
+                return []
+            xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{xml_name}"
+            xr = requests.get(xml_url, headers=HEADERS, timeout=10)
+            time.sleep(0.12)
+            if xr.ok and "<ownershipDocument" in xr.text:
+                return parse_form4_xml(xr.text, ticker)
         except Exception:
             pass
         return []
 
     # ── Step 3: For each EFTS hit, find the ticker and parse XML ─────────────
+    # Response structure (confirmed):
+    #   _source.adsh       = accession number e.g. "0001193125-26-227821"
+    #   _source.ciks       = [insider_cik, company_cik, ...]  (company is last non-insider)
+    #   _source.display_names = ["Wang Yanjun (CIK 0002113214)", "Sea Ltd (CIK 0001703399)"]
     efts_found = 0
     for hit in efts_hits:
         src = hit.get("_source", {})
-        entity_id = hit.get("_id", "")  # format: accession-number
-        # Extract accession from _id (e.g. "0001234567-24-000001")
-        acc = entity_id if entity_id.count("-") >= 2 else ""
+        acc = src.get("adsh", "")  # e.g. "0001193125-26-227821"
         if not acc:
             continue
-        # Try to identify ticker from entity name or CIK in the hit
-        # EFTS hits include 'entity_id' which maps to CIK
-        hit_cik = str(src.get("entity_id") or hit.get("_routing") or "").zfill(10)
-        ticker = cik_ticker.get(hit_cik, "")
+        # All CIKs in the filing — match any against our ticker map
+        ciks_in_hit = [str(c).zfill(10) for c in src.get("ciks", [])]
+        ticker = ""
+        company_cik = ""
+        for c in ciks_in_hit:
+            if c in cik_ticker:
+                ticker = cik_ticker[c]
+                company_cik = c
+                break
         if not ticker:
             continue  # not one of our tracked tickers
-        txns = fetch_and_parse_accession(acc, hit_cik, ticker)
+        txns = fetch_and_parse_accession(acc, company_cik, ticker)
         results.extend(txns)
         if txns:
             efts_found += 1
