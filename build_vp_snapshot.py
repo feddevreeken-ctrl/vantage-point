@@ -544,32 +544,35 @@ def fetch_sec_edgar_form4(tracked_tickers, min_value=50000, days_back=730):
         return txns
 
     def fetch_and_parse_accession(acc, cik, ticker):
-        """Fetch the Form 4 XML for a given accession number and parse it."""
+        """Fetch the Form 4 XML for a given accession number and parse it.
+
+        SEC filenames are unpredictable (e.g. tm2614830-1_4seq1.xml) so we
+        must parse the HTML directory listing to find the right XML file.
+        """
+        import re as _re
         acc_dashed = acc if "-" in acc else f"{acc[:10]}-{acc[10:12]}-{acc[12:]}"
         acc_clean = acc_dashed.replace("-", "")
         if acc_dashed in seen_accessions:
             return []
         seen_accessions.add(acc_dashed)
         cik_int = int(cik)
-        # Always use the index JSON to find the real XML filename
-        # (the filename is never simply acc.xml — it varies per filing agent)
         try:
-            idx_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{acc_dashed}-index.json"
-            r = requests.get(idx_url, headers=HEADERS, timeout=10)
+            # Fetch the HTML directory listing — always works, contains all filenames
+            dir_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/"
+            r = requests.get(dir_url, headers=HEADERS, timeout=10)
             time.sleep(0.12)
             if not r.ok:
                 return []
-            items = r.json().get("directory", {}).get("item", [])
-            # Find the primary Form 4 XML (not the index XML, not the htm)
-            xml_name = None
-            for item in items:
-                name = item.get("name", "")
-                if name.endswith(".xml") and "-index" not in name and "xsl" not in name.lower():
-                    xml_name = name
-                    break
-            if not xml_name:
+            # Extract all XML hrefs from the directory HTML
+            xml_files = _re.findall(r'href="(/Archives/edgar/data/[^"]+\.xml)"', r.text)
+            # Filter to ownership/form4 XMLs — skip stylesheets and index files
+            form4_xmls = [
+                f for f in xml_files
+                if "xsl" not in f.lower() and "index" not in f.lower()
+            ]
+            if not form4_xmls:
                 return []
-            xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{xml_name}"
+            xml_url = "https://www.sec.gov" + form4_xmls[0]
             xr = requests.get(xml_url, headers=HEADERS, timeout=10)
             time.sleep(0.12)
             if xr.ok and "<ownershipDocument" in xr.text:
